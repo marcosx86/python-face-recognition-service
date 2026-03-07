@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment files
+.env
+.flaskenv
+
+# Database and media storage
+face_storage/
+*.sqlite3
+
+# Flask migrations
+# We might want to commit migrations, so let's keep them tracked
+# migrations/
+
+# IDEs
+.vscode/
+.idea/
+*.swp

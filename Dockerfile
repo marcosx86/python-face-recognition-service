@@ -1,0 +1,48 @@
+# We use Python 3.12 slim to keep the image size small while still having a full Linux environment
+FROM python:3.12-slim
+
+# Set working directory
+WORKDIR /app
+
+# Set python environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV FLASK_APP=app.py
+
+# Database connection defaults (Can be overridden at runtime via docker run -e)
+ENV DB_USER=facialrecognition
+ENV DB_PASSWORD=123Mud4r!
+ENV DB_NAME=facialrecognition
+ENV DB_HOST=192.168.88.71
+ENV DB_PORT=5434
+
+# Install system dependencies required for OpenCV, dlib compilation, and psycopg2
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    libgl1 \
+    libglib2.0-0 \
+    git \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the requirements file into the container
+COPY requirements.txt .
+
+# Install Python dependencies
+# We also install Gunicorn here to use it as the production WSGI web server
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir gunicorn==21.2.0
+
+# Copy the rest of the application code
+COPY . .
+
+# Ensure the face_storage directory exists and has correct permissions
+RUN mkdir -p face_storage && chmod 777 face_storage
+
+# Expose port 5000
+EXPOSE 5000
+
+# The startup command runs database migrations automatically (handled in app.py logic if called directly,
+# but since we are using Gunicorn, we should run the migrations explicitly before starting the server)
+CMD flask db upgrade && gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 app:app
