@@ -10,11 +10,11 @@ ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=app.py
 
 # Database connection defaults (Can be overridden at runtime via docker run -e)
-ENV DB_USER=facialrecognition
-ENV DB_PASSWORD=123Mud4r!
-ENV DB_NAME=facialrecognition
-ENV DB_HOST=192.168.88.71
-ENV DB_PORT=5434
+ARG DB_USER
+ARG DB_PASSWORD
+ARG DB_NAME
+ARG DB_HOST
+ENV DB_PORT=5432
 
 # Install system dependencies required for OpenCV, dlib compilation, and psycopg2
 RUN apt-get update && apt-get install -y \

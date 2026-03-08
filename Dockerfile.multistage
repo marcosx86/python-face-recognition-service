@@ -1,0 +1,64 @@
+# Stage 1: Build environment
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies required for compiling dlib, OpenCV, and psycopg2
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a virtual environment to isolate dependencies
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy the requirements file and install dependencies
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir gunicorn==21.2.0
+
+# Stage 2: Runtime environment
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Set python environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV FLASK_APP=app.py
+
+# Database connection defaults (Can be overridden at runtime via docker run -e)
+ENV DB_USER=facialrecognition
+ENV DB_PASSWORD=123mudar
+ENV DB_NAME=facialrecognition
+ENV DB_HOST=127.0.0.1
+ENV DB_PORT=5432
+
+# Install only runtime system dependencies (no build tools)
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the virtual environment from the builder stage
+COPY --from=builder /opt/venv /opt/venv
+
+# Make sure the virtual environment is used
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy the rest of the application code
+COPY . .
+
+# Ensure the face_storage directory exists and has correct permissions
+RUN mkdir -p face_storage && chmod 777 face_storage
+
+# Expose port 5000
+EXPOSE 5000
+
+# Start the application, running migrations first
+CMD flask db upgrade && gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 app:app
