@@ -4,6 +4,9 @@ Provides REST API endpoints for registering users, performing facial recognition
 and retrieving stored user data and images.
 """
 # Standard library
+import warnings
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+
 import os
 import hashlib
 import logging

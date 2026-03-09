@@ -25,7 +25,7 @@ pillow==12.1.1
 psycopg2-binary==2.9.11
 python-dotenv==1.2.2
 requests==2.32.5
-setuptools==69.5.1
+setuptools>=78.1.1,<82
 SQLAlchemy==2.0.48
 typing_extensions==4.15.0
 urllib3==2.6.3
