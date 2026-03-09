@@ -6,6 +6,9 @@ using dlib (via face_recognition) and OpenCV.
 import face_recognition
 import cv2
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 def extract_face_encoding(image_stream, registration_mode=False):
     """
@@ -27,11 +30,21 @@ def extract_face_encoding(image_stream, registration_mode=False):
     """
     # Load the image using the face_recognition library
     # It dynamically handles numpy arrays and file-like objects (like those passed by Flask)
-    image = face_recognition.load_image_file(image_stream)
+    logger.debug("Loading image for face extraction.")
+    try:
+        image = face_recognition.load_image_file(image_stream)
+    except Exception as e:
+        logger.error(f"Failed to load image for face extraction: {e}")
+        raise ValueError(f"Failed to load image for face extraction: {e}")
     
     # 1. Detect where faces are located in the image
     # We use the default HOG (Histogram of Oriented Gradients) model because it's fast on the CPU
-    face_locations = face_recognition.face_locations(image, model="hog")
+    logger.debug("Detecting face locations (HOG model).")
+    try:
+        face_locations = face_recognition.face_locations(image, model="hog")
+    except Exception as e:
+        logger.error(f"Failed to detect face locations: {e}")
+        raise ValueError(f"Failed to detect face locations: {e}")
     
     if len(face_locations) == 0:
         raise ValueError("No faces were found in the uploaded image.")
@@ -39,12 +52,17 @@ def extract_face_encoding(image_stream, registration_mode=False):
     face_width = right - left
     face_height = bottom - top
     
-    # Extract the cropped region of just the face from the original RGB array
-    face_image = image[top:bottom, left:right]
-    # Convert to grayscale for OpenCV
-    gray_face = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
-    # Calculate the variance of the laplacian; higher is sharper
-    blur_score = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+    try:
+        # Extract the cropped region of just the face from the original RGB array
+        face_image = image[top:bottom, left:right]
+        # Convert to grayscale for OpenCV
+        gray_face = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
+        # Calculate the variance of the laplacian; higher is sharper
+        blur_score = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+        logger.debug(f"Detected face dimensions: {face_width}x{face_height}. Blur score: {blur_score:.2f}")
+    except Exception as e:
+        logger.error(f"Failed to process face image: {e}")
+        raise ValueError(f"Failed to process face image: {e}")
 
     if registration_mode:
         # Biometric Check A: Face Resolution
@@ -58,6 +76,9 @@ def extract_face_encoding(image_stream, registration_mode=False):
             raise ValueError(f"Face appears to be too blurry or out of focus (Focus score: {blur_score:.1f}). Please capture a sharper image.")
 
     # 2. Extract the 128-dimensional embedding for the recognized face
-    face_encodings = face_recognition.face_encodings(image, known_face_locations=face_locations)
+    try:
+        face_encodings = face_recognition.face_encodings(image, known_face_locations=face_locations)
+    except Exception as e:
+        raise ValueError(f"Could not extract face encoding: {e}")
     
     return face_encodings[0], float(blur_score)

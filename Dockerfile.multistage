@@ -57,8 +57,11 @@ COPY . .
 # Ensure the face_storage directory exists and has correct permissions
 RUN mkdir -p face_storage && chmod 777 face_storage
 
+# Add volume for face_storage
+VOLUME ["/app/face_storage"]
+
 # Expose port 5000
 EXPOSE 5000
 
 # Start the application, running migrations first
-CMD flask db upgrade && gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 app:app
+CMD ["flask db upgrade && gunicorn --bind 0.0.0.0:5000 --workers 4 --threads 8 --timeout 120 app:app"]

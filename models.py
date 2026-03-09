@@ -5,6 +5,7 @@ PostgreSQL's pgvector extension for efficient similarity matching.
 """
 from flask_sqlalchemy import SQLAlchemy
 from pgvector.sqlalchemy import Vector
+from datetime import datetime
 
 db = SQLAlchemy()
 
@@ -20,8 +21,13 @@ class User(db.Model):
     # The identifier could be an employee ID, username, or email
     identifier = db.Column(db.String(255), unique=True, nullable=False)
     
+    register_time = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_time = db.Column(db.DateTime, nullable=True)
+    
     # One-to-many relationship: A user can have multiple face encodings (e.g., different profiles/lighting)
     encodings = db.relationship('FaceEncoding', backref='user', lazy=True, cascade="all, delete-orphan")
+    webhooks = db.relationship('Webhook', backref='user', lazy=True, cascade="all, delete-orphan")
+    detection_logs = db.relationship('DetectionLog', backref='user', lazy=True, cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User {self.identifier}>"
@@ -45,5 +51,29 @@ class FaceEncoding(db.Model):
     # Store the SHA256 filename of the original face picture
     image_filename = db.Column(db.String(255), nullable=True)
     
+class DetectionLog(db.Model):
+    """
+    Audit trail of every time a person was detected/recognized successfully.
+    """
+    __tablename__ = 'detection_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    
     def __repr__(self):
-        return f"<FaceEncoding {self.id} for User {self.user_id}>"
+        return f"<DetectionLog User {self.user_id} at {self.timestamp}>"
+
+class Webhook(db.Model):
+    """
+    Stores webhook URLs registered to a particular user.
+    """
+    __tablename__ = 'webhooks'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    event_kind = db.Column(db.String(50), nullable=False)
+    target_url = db.Column(db.Text, nullable=False)
+    
+    def __repr__(self):
+        return f"<Webhook {self.id} for User {self.user_id} Event {self.event_kind}>"

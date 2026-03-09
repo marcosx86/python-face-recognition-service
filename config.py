@@ -4,6 +4,9 @@ Loads database connection parameters from environment variables
 with development-friendly fallbacks.
 """
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Config:
     """Base configuration class containing application settings."""
