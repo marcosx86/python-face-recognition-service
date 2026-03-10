@@ -22,6 +22,7 @@ opencv-python-headless==4.13.0.92
 packaging==26.0
 pgvector==0.4.2
 pillow==12.1.1
+pip==25.0.1
 psycopg2-binary==2.9.11
 python-dotenv==1.2.2
 requests==2.32.5

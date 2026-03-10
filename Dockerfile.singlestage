@@ -17,7 +17,7 @@ ARG DB_HOST
 ENV DB_PORT=5432
 
 # Install system dependencies required for OpenCV, dlib compilation, and psycopg2
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     build-essential \
     cmake \
     libgl1 \
