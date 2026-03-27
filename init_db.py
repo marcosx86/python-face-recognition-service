@@ -34,7 +34,21 @@ def setup_database():
             
         logger.info("Creating table structures (if missing)...")
         db.create_all()
-        logger.info("Done! Database tables are ready.")
+        
+        logger.info("Ensuring HNSW index exists for optimized vector search...")
+        try:
+            # Create HNSW index for L2 distance if it doesn't exist
+            # Note: Postgres 15+ supports 'IF NOT EXISTS' for indexes directly.
+            # For broader compatibility, we just attempt it and catch the 'already exists' error if needed,
+            # but 'CREATE INDEX IF NOT EXISTS' is standard in modern Postgres/pgvector setups.
+            db.session.execute(text('CREATE INDEX IF NOT EXISTS idx_face_encodings_vector ON face_encodings USING hnsw (encoding vector_l2_ops)'))
+            db.session.commit()
+            logger.info("HNSW vector index is ready.")
+        except Exception as e:
+            db.session.rollback()
+            logger.warning(f"Could not create HNSW index: {e}. Performance may be degraded for large datasets.")
+            
+        logger.info("Done! Database tables and indexes are ready.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Initialize Database for Facial Recognition Service")

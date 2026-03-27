@@ -1,0 +1,527 @@
+openapi: 3.0.3
+info:
+  title: Facial Recognition Service API
+  description: |
+    REST API for registering users via biometric face encodings, performing
+    facial recognition matches, managing webhooks, and retrieving stored user
+    data and images. Uses PostgreSQL with pgvector for fast L2-distance
+    similarity search on 128-D face embeddings.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:5000
+    description: Local development server
+
+tags:
+  - name: Registration
+    description: Register new face profiles
+  - name: Recognition
+    description: Identify known users from face images
+  - name: Users
+    description: Manage registered users
+  - name: Webhooks
+    description: Manage webhook subscriptions
+
+paths:
+  # ──────────────────────────── Registration ────────────────────────────
+  /api/v1/register:
+    post:
+      tags: [Registration]
+      summary: Register a new face profile
+      description: |
+        Accepts a face image and a unique identifier string.
+        Performs strict biometric quality checks, computes a 128-D encoding,
+        and stores the encoding alongside the SHA256-hashed image file.
+      operationId: registerFace
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image, identifier]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Face image file (JPEG/PNG)
+                identifier:
+                  type: string
+                  description: Unique user identifier (e.g. employee ID, email)
+                  example: john.doe
+      responses:
+        "201":
+          description: Face successfully registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: "Successfully registered face profile for identifier 'john.doe'."
+        "400":
+          description: Missing fields or image failed quality checks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Server busy processing another request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ──────────────────────────── Recognition ─────────────────────────────
+  /api/v1/recognize:
+    post:
+      tags: [Recognition]
+      summary: Recognize a face from an image
+      description: |
+        Uploads a face image and searches for the closest matching user in
+        the database using L2-distance on pgvector embeddings.
+        If the incoming image is significantly higher quality than the stored
+        baseline, the biometric record is automatically upgraded.
+      operationId: recognizeFace
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Face image file (JPEG/PNG)
+      responses:
+        "200":
+          description: Recognition result (match or no match)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RecognitionMatch"
+                  - $ref: "#/components/schemas/RecognitionNoMatch"
+        "400":
+          description: Missing image or image failed extraction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Server busy processing another request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ──────────────────────────── Users ───────────────────────────────────
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: List all registered users
+      operationId: getUsers
+      responses:
+        "200":
+          description: Array of user detail objects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UserDetail"
+
+  /api/v1/sync:
+    post:
+      tags: [Recognition]
+      summary: All-in-one web sync (detect, recognize, register)
+      description: |
+        Optimized for high-rate (1-2 FPS) web/mobile browser streams.
+        Detects all faces in the frame. Recognizes known users.
+        If 'identifier' is provided and no face matches it, registers the best unknown face.
+      operationId: syncFaces
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Frame image (JPEG/PNG)
+                identifier:
+                  type: string
+                  description: Optional user identifier to register/update
+      responses:
+        "200":
+          description: List of detected faces and their status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "400":
+          description: Extraction failed or missing image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Server busy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/users/{identifier}:
+    get:
+      tags: [Users]
+      summary: Get a specific user
+      operationId: getUser
+      parameters:
+        - $ref: "#/components/parameters/Identifier"
+      responses:
+        "200":
+          description: User detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDetail"
+        "404":
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Users]
+      summary: Delete a user
+      description: |
+        Permanently removes the user and all associated data —
+        face encodings, webhooks, detection logs, and stored image files.
+      operationId: deleteUser
+      parameters:
+        - $ref: "#/components/parameters/Identifier"
+      responses:
+        "200":
+          description: User deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: "User 'john.doe' and all associated data have been deleted."
+        "404":
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Database error during deletion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/users/{identifier}/face:
+    get:
+      tags: [Users]
+      summary: Get a user's stored face image
+      description: Returns the original face image file stored on disk for the given user.
+      operationId: getUserFace
+      parameters:
+        - $ref: "#/components/parameters/Identifier"
+      responses:
+        "200":
+          description: The face image file
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: User or face image not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ──────────────────────────── Webhooks ────────────────────────────────
+  /api/v1/webhooks:
+    post:
+      tags: [Webhooks]
+      summary: Register a webhook
+      description: Registers a callback URL to receive events for a specific user.
+      operationId: registerWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, event_kind, target_url]
+              properties:
+                identifier:
+                  type: string
+                  description: User identifier to attach the webhook to
+                  example: john.doe
+                event_kind:
+                  type: string
+                  description: Event type that triggers the webhook
+                  example: face_detected
+                target_url:
+                  type: string
+                  format: uri
+                  description: URL to POST the webhook payload to
+                  example: https://example.com/hooks/face
+      responses:
+        "201":
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Webhook registered successfully.
+                  webhook_id:
+                    type: integer
+                    example: 1
+        "400":
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Database error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    get:
+      tags: [Webhooks]
+      summary: List webhooks
+      description: Returns all registered webhooks. Optionally filter by user identifier.
+      operationId: listWebhooks
+      parameters:
+        - name: identifier
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter webhooks by user identifier
+      responses:
+        "200":
+          description: Array of webhook objects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WebhookDetail"
+
+  /api/v1/webhooks/{webhook_id}:
+    delete:
+      tags: [Webhooks]
+      summary: Delete a webhook
+      operationId: deleteWebhook
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: ID of the webhook to delete
+      responses:
+        "200":
+          description: Webhook deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Webhook deleted successfully.
+        "404":
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Database error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+# ═══════════════════════════ Reusable Components ═══════════════════════════
+components:
+  parameters:
+    Identifier:
+      name: identifier
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Unique user identifier (e.g. employee ID, email)
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Descriptive error message.
+
+    UserDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        identifier:
+          type: string
+          example: john.doe
+        register_time:
+          type: string
+          format: date-time
+          example: "2026-03-10T13:00:00"
+          nullable: true
+        last_seen_time:
+          type: string
+          format: date-time
+          example: "2026-03-10T14:30:00"
+          nullable: true
+        face_count:
+          type: integer
+          description: Number of face encodings stored for this user
+          example: 1
+
+    RecognitionMatch:
+      type: object
+      properties:
+        match:
+          type: boolean
+          example: true
+        identifier:
+          type: string
+          example: john.doe
+        confidence_distance:
+          type: number
+          format: float
+          description: L2 distance (lower is better; < 0.6 is a positive match)
+          example: 0.3521
+        biometric_updated:
+          type: boolean
+          description: Whether the stored biometric was auto-upgraded with this higher-quality image
+          example: false
+        biometric_improvement_message:
+          type: string
+          description: Present only when biometric_updated is true
+          example: The biometric record was upgraded with this clearer facial capture.
+
+    RecognitionNoMatch:
+      type: object
+      properties:
+        match:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: Face not recognized or no users registered.
+
+    WebhookDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        identifier:
+          type: string
+          example: john.doe
+        event_kind:
+          type: string
+          example: face_detected
+        target_url:
+          type: string
+          format: uri
+          example: https://example.com/hooks/face
+
+    SyncResponse:
+      type: object
+      properties:
+        faces:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncFace"
+
+    SyncFace:
+      type: object
+      properties:
+        identifier:
+          type: string
+          example: john.doe
+        confidence:
+          type: number
+          format: float
+          nullable: true
+          example: 0.8542
+        box:
+          type: object
+          properties:
+            top:
+              type: integer
+              example: 100
+            right:
+              type: integer
+              example: 300
+            bottom:
+              type: integer
+              example: 400
+            left:
+              type: integer
+              example: 50

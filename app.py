@@ -12,10 +12,13 @@ import hashlib
 import logging
 import argparse
 import threading
+import time
+import contextlib
 from datetime import datetime, timezone, timedelta
 
 # Third-party
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 from flask_migrate import Migrate, upgrade
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
@@ -25,7 +28,7 @@ import requests
 # Local
 from config import Config
 from models import db, User, FaceEncoding, Webhook, DetectionLog
-from utils import extract_face_encoding
+from utils import extract_face_encoding, extract_all_faces, Profiler
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,7 @@ logger = logging.getLogger(__name__)
 _face_processing_lock = threading.Lock()
 
 app = Flask(__name__)
+CORS(app) # Enable CORS with default "allow all"
 # Load configuration options containing the database URI
 app.config.from_object(Config)
 
@@ -127,6 +131,10 @@ def register_face():
         except Exception as e:
             logger.error(f"Unknown exception during registration: {e}")
             return jsonify({"error": str(e)}), 500
+        finally:
+            # RELEASE LOCK EARLY: We are done with dlib.
+            if _face_processing_lock.locked():
+                _face_processing_lock.release()
         
         try:
             # Valid face found and extracted. Now calculate hash and save to disk
@@ -158,7 +166,8 @@ def register_face():
             "message": f"Successfully registered face profile for identifier '{identifier}'."
         }), 201
     finally:
-        _face_processing_lock.release()
+        if _face_processing_lock.locked():
+            _face_processing_lock.release()
 
 
 @app.route('/api/v1/recognize', methods=['POST'])
@@ -190,17 +199,23 @@ def recognize_face():
         except ValueError as e:
             logger.warning(f"Recognition failed: {e}")
             return jsonify({"error": str(e)}), 400
-        
+        finally:
+            # RELEASE LOCK EARLY: We are done with dlib/face_recognition (not thread-safe).
+            # We can now handle database queries and webhooks concurrently.
+            _face_processing_lock.release()
+
         # The standard threshold used by `face_recognition` library bounds is 0.6.
         # Distances < 0.6 represent a positive match; strict similarity might use a lower number like 0.4.
         MATCH_THRESHOLD = 0.6
     
-        # Query PostgreSQL to find the absolute closest face encoding using pgvector's fast L2 distance calculation (`<->`)
-        closest_match = FaceEncoding.query.order_by(FaceEncoding.encoding.l2_distance(encoding)).first()
+        # Query PostgreSQL to find the closest match AND its distance in a single roundtrip
+        match_result = db.session.query(
+            FaceEncoding, 
+            FaceEncoding.encoding.l2_distance(encoding).label('distance')
+        ).order_by('distance').first()
     
-        if closest_match:
-            # Re-fetch the exact scalar distance of that closest record
-            distance = db.session.query(FaceEncoding.encoding.l2_distance(encoding)).filter(FaceEncoding.id == closest_match.id).scalar()
+        if match_result:
+            closest_match, distance = match_result
             logger.debug(f"Closest match distance for ID {closest_match.user.id}: {distance}")
         
             if distance < MATCH_THRESHOLD:
@@ -281,8 +296,176 @@ def recognize_face():
             "match": False,
             "message": "Face not recognized or no users registered."
         }), 200
+    except Exception as e:
+        logger.error(f"Error in recognize_face: {e}")
+        return jsonify({"error": str(e)}), 500
     finally:
-        _face_processing_lock.release()
+        # Final safety release in case lock wasn't released yet
+        if _face_processing_lock.locked():
+            _face_processing_lock.release()
+
+@app.route('/api/v1/sync', methods=['POST'])
+def sync_faces():
+    """
+    All-in-one endpoint for web/mobile browsers.
+    Detects all faces in a frame, recognizes known users, and optionally
+    registers an unknown face if a 'identifier' is provided.
+    
+    Optimized for 1-2 FPS continuous streams.
+    Returns: list of {"identifier": str, "box": {"top": int, ...}, "confidence": float}
+    """
+    if 'image' not in request.files:
+        logger.warning("Missing 'image' in form data during sync.")
+        return jsonify({"error": "Missing 'image' in form data."}), 400
+
+    identifier = request.form.get('identifier')
+    max_faces = int(request.form.get('max_faces', 0))
+    
+    if not _face_processing_lock.acquire(blocking=False):
+        logger.warning("Server busy — rejecting sync request.")
+        return jsonify({"error": "Server is busy processing other requests. Try again shortly."}), 503
+
+    profiler = Profiler()
+    start_time = time.perf_counter()
+    try:
+        image_file = request.files['image']
+        logger.info(f"Processing sync request. Target identifier: {identifier}, max_faces: {max_faces}")
+    
+        try:
+            # Pass the profiler instance and max_faces limit to extract_all_faces
+            detected_faces = extract_all_faces(image_file, max_faces=max_faces, profiler=profiler)
+        except ValueError as e:
+            logger.warning(f"Sync failed during extraction: {e}")
+            return jsonify({"error": str(e)}), 400
+        finally:
+            # RELEASE LOCK EARLY: Extraction finished.
+            if _face_processing_lock.locked():
+                _face_processing_lock.release()
+
+        MATCH_THRESHOLD = 0.6
+        response_faces = []
+        
+        # Pre-fetch target user if identifier is provided
+        target_user = None
+        if identifier:
+            with profiler.step("query_user"):
+                target_user = User.query.filter_by(identifier=identifier).first()
+                if not target_user:
+                    target_user = User(identifier=identifier)
+                    db.session.add(target_user)
+                    db.session.flush()
+
+        best_unrecognized_face = None
+        best_unrecognized_score = -1.0
+        
+        now = datetime.now(timezone.utc)
+        
+        for face_data in detected_faces:
+            encoding = face_data['encoding']
+            box = face_data['box'] # (top, right, bottom, left)
+            blur_score = face_data['blur_score']
+            
+            # 1. Optimized Similarity Search
+            with profiler.step("similarity_search"):
+                match_result = db.session.query(
+                    FaceEncoding, 
+                    FaceEncoding.encoding.l2_distance(encoding).label('distance')
+                ).order_by('distance').first()
+            
+            face_result = {
+                "identifier": "unknown",
+                "confidence": None,
+                "box": {
+                    "top": int(box[0]),
+                    "right": int(box[1]),
+                    "bottom": int(box[2]),
+                    "left": int(box[3])
+                }
+            }
+            
+            found_match = False
+            if match_result:
+                closest_match, distance = match_result
+                if distance < MATCH_THRESHOLD:
+                    found_match = True
+                    face_result["identifier"] = closest_match.user.identifier
+                    face_result["confidence"] = round(1.0 - distance, 4)
+                    
+                    # Log detection
+                    with profiler.step("log_detection"):
+                        detection = DetectionLog(user_id=closest_match.user.id, timestamp=now)
+                        db.session.add(detection)
+                        closest_match.user.last_seen_time = now
+                    
+                    # Auto-healing if this is the target user or if we just want to improve records
+                    if blur_score > (closest_match.quality_score * 1.1) and blur_score > 100.0:
+                        with profiler.step("auto_healing"):
+                            image_file.seek(0)
+                            image_filename = save_face_image_to_disk(image_file)
+                            closest_match.encoding = encoding
+                            closest_match.quality_score = blur_score
+                            closest_match.image_filename = image_filename
+                            logger.debug(f"Upgraded biometric for user '{closest_match.user.identifier}'")
+            
+            if not found_match and identifier:
+                # Candidate for registration
+                width = box[1] - box[3]
+                height = box[2] - box[0]
+                # Apply registration quality standards
+                if width >= 100 and height >= 100 and blur_score >= 75.0:
+                    if blur_score > best_unrecognized_score:
+                        best_unrecognized_score = blur_score
+                        best_unrecognized_face = face_data
+            
+            response_faces.append(face_result)
+            
+        # 2. Handle Registration if needed
+        # If an identifier was provided but no face in the frame matched it,
+        # register the best unrecognized face as this identifier.
+        if target_user and not any(f["identifier"] == identifier for f in response_faces):
+            if best_unrecognized_face:
+                with profiler.step("registration"):
+                    image_file.seek(0)
+                    image_filename = save_face_image_to_disk(image_file)
+                    new_face = FaceEncoding(
+                        user_id=target_user.id,
+                        encoding=best_unrecognized_face['encoding'],
+                        quality_score=best_unrecognized_face['blur_score'],
+                        image_filename=image_filename
+                    )
+                    db.session.add(new_face)
+                    
+                    # Update the response identifier for this specific box
+                    target_box = best_unrecognized_face['box']
+                    for f in response_faces:
+                        if f["box"]["top"] == int(target_box[0]) and f["box"]["left"] == int(target_box[3]):
+                            f["identifier"] = identifier
+                            break
+                    logger.info(f"Automatically registered face for identifier '{identifier}'")
+
+        with profiler.step("commit"):
+            try:
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Failed to commit changes in sync endpoint: {e}")
+                # We still return what we found, even if DB update failed
+            
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.info(f"Sync completed in {duration_ms} ms")
+        logger.info(f"Flame graph: {profiler.get_report()}")
+        return jsonify({
+            "faces": response_faces,
+            "server_process_time_ms": duration_ms,
+            "flame_graph": profiler.get_report()
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in sync_faces: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if _face_processing_lock.locked():
+            _face_processing_lock.release()
+
 
 @app.route('/api/v1/webhooks', methods=['POST'])
 def register_webhook():

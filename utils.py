@@ -7,8 +7,30 @@ import face_recognition
 import cv2
 import numpy as np
 import logging
+import time
+import contextlib
 
 logger = logging.getLogger(__name__)
+
+class Profiler:
+    """Helper class to track timings for a flame-graph-like breakdown."""
+    def __init__(self):
+        self.points = []
+
+    @contextlib.contextmanager
+    def step(self, name):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            end = time.perf_counter()
+            self.points.append({
+                "label": name,
+                "duration_ms": round((end - start) * 1000, 2)
+            })
+
+    def get_report(self):
+        return self.points
 
 def extract_face_encoding(image_stream, registration_mode=False):
     """
@@ -82,3 +104,81 @@ def extract_face_encoding(image_stream, registration_mode=False):
         raise ValueError(f"Could not extract face encoding: {e}")
     
     return face_encodings[0], float(blur_score)
+
+def extract_all_faces(image_stream, max_faces=0, profiler=None):
+    """
+    Detects all faces in the provided image stream and extracts their 128-D embeddings and quality data.
+    
+    Args:
+        image_stream (file-like): The image data stream.
+        max_faces (int): Maximum number of faces to process. 0 for unlimited.
+        profiler (Profiler, optional): An optional Profiler instance to record timings.
+                                  
+    Returns:
+        list: A list of dicts, each containing:
+            - 'encoding': numpy.ndarray (128-D vector)
+            - 'box': tuple (top, right, bottom, left)
+            - 'blur_score': float
+            
+    Raises:
+        ValueError: If the image cannot be loaded or processed.
+    """
+    if profiler is None:
+        class DummyProfiler:
+            @contextlib.contextmanager
+            def step(self, name):
+                yield
+        profiler = DummyProfiler()
+
+    logger.debug("Loading image for multi-face extraction.")
+    try:
+        with profiler.step("load_image_file"):
+            image = face_recognition.load_image_file(image_stream)
+    except Exception as e:
+        logger.error(f"Failed to load image: {e}")
+        raise ValueError(f"Failed to load image: {e}")
+    
+    logger.debug("Detecting all face locations (HOG model).")
+    try:
+        with profiler.step("face_locations"):
+            face_locations = face_recognition.face_locations(image, model="hog")
+    except Exception as e:
+        logger.error(f"Failed to detect face locations: {e}")
+        raise ValueError(f"Failed to detect face locations: {e}")
+    
+    if len(face_locations) == 0:
+        return []
+
+    # Optimization: If max_faces is set, sort by area (largest first) and slice
+    if max_faces > 0 and len(face_locations) > max_faces:
+        logger.debug(f"Limiting to top {max_faces} faces by area.")
+        # Area = (bottom - top) * (right - left)
+        face_locations.sort(key=lambda loc: (loc[2] - loc[0]) * (loc[1] - loc[3]), reverse=True)
+        face_locations = face_locations[:max_faces]
+
+    try:
+        with profiler.step("face_encodings"):
+            face_encodings = face_recognition.face_encodings(image, known_face_locations=face_locations)
+    except Exception as e:
+        logger.error(f"Could not extract face encodings: {e}")
+        raise ValueError(f"Could not extract face encodings: {e}")
+
+    results = []
+    with profiler.step("blur_check_loop"):
+        for i, location in enumerate(face_locations):
+            top, right, bottom, left = location
+            # Extract the cropped region of just the face from the original RGB array for blur check
+            face_image = image[top:bottom, left:right]
+            # Convert to grayscale for OpenCV
+            gray_face = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
+            # Calculate the variance of the laplacian; higher is sharper
+            blur_score = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+            
+            results.append({
+                'encoding': face_encodings[i],
+                'box': location, # (top, right, bottom, left)
+                'blur_score': float(blur_score)
+            })
+        
+    return results
+
